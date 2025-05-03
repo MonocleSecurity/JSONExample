@@ -1,0 +1,480 @@
+<html>
+<head>
+<link rel="icon" href="data:,">
+</head>
+<body>
+<style>
+table, th, td
+{
+  white-space: nowrap;
+  text-align: left;
+  border: 1px solid black;
+  border-collapse: collapse;
+  padding-left: 5px;
+  padding-right: 5px;
+}
+</style>
+<div id="form">
+<label>Hostname:</label><br>
+<input type="text" id="hostname" name="hostname" value="window.location.host"><br><br>
+<label>Port:</label><br>
+<input type="text" id="port" name="port" value="9854"><br><br>
+<label>Username:</label><br>
+<input type="text" id="username" name="username" value="admin"><br><br>
+<label>Password:</label><br>
+<input type="password" id="password" name="password" value="password"><br><br>
+<button onclick="login()">Login</button>
+</div>
+<table id="table" hidden="true">
+  <tr>
+    <th width="1">Device</th>
+    <th width="1">Recording</th>
+    <th width="1">Video</th>
+    <th width="1">playback</th>
+    <th width="1">live</th>
+  </tr>
+</table>
+<script>
+// Classes
+class Recording
+{
+  constructor(recording_token, video_track_id, audio_track_id, device_name_element, video_element)
+  {
+    this.recording_token = recording_token;
+    this.video_track_id = video_track_id;
+    this.audio_track_id = audio_track_id;
+	this.device_name_element = device_name_element;
+    this.video_element = video_element;
+	this.peer_id = `${Math.random() + 1}`.replace(".", "");
+    this.pc = null;
+	this.data_channel = null;
+  }
+}
+recordings = new Array();
+
+class Connection
+{
+  constructor(hostname, port, username, password)
+  {
+    this.next_message_id = 0;
+    this.jwttoken = "";
+    this.websocket = new WebSocket("ws:/" + hostname + ":" + port + "/json");
+    this.websocket.onerror = (event) =>
+    {
+      console.log("websocket failure");
+    };
+    this.websocket.onopen = (event) =>
+    {
+      this.send_message("authenticate", "{\"username\":\"" + username + "\", \"password\":\"" + password + "\"}", "{}");
+    };
+    this.websocket.onmessage = (event) =>
+    {
+      const data = JSON.parse(event.data)
+      if (data.method == "authenticate")
+      {
+        this.jwttoken = data.result.jwttoken;
+        this.send_message("subscribe", "{\"jwttoken\":\"" + this.jwttoken + "\"}", "{}");
+        return;
+      }
+      else if (data.method == "subscribe")
+      {
+        // First message is always the full initial devices state
+        var table = document.getElementById("table");
+        for(let i = 0; i < data.result.recordings.length; i++)
+        {
+          let recording = data.result.recordings[i];
+          var video_track_id = 0;
+          var audio_track_id = 0;
+          for(let j = 0; j < recording.tracks.length; j++)
+          {
+            var track = recording.tracks[j];
+            if (track.type == "Video")
+            {
+              video_track_id = track.id;
+            }
+            else if (track.type == "Audio")
+            {
+              audio_track_id = track.id;
+            }
+          }
+          // Device element
+          const device_name_element = document.createElement("p");
+          device_name_element.appendChild(document.createTextNode(data.result.name));
+          // Video element
+          var video_element_id = "0_" + recording.token; // <NodeToken>_<RecordingToken>
+          var video_element = document.createElement("video")
+          video_element.id = video_element_id;
+          video_element.autoplay = true;
+          video_element.muted = true;
+          video_element.playsinline = true;
+          video_element.width = 480;
+          video_element.height = 360;
+          video_element.disablepictureinpicture = true;
+          // Buttons
+          let playback_button_element = document.createElement("button");
+          playback_button_element.textContent = "playback";
+          let live_button_element = document.createElement("button");
+          live_button_element.textContent = "live";
+          // Table
+          var row = table.insertRow(1);
+          row.insertCell(0).appendChild(device_name_element);
+          row.insertCell(1).innerHTML = recording.name;
+          row.insertCell(2).appendChild(video_element);
+          row.insertCell(3).appendChild(playback_button_element);
+          row.insertCell(4).appendChild(live_button_element);
+          let r = new Recording(recording.token, video_track_id, audio_track_id, device_name_element, video_element);
+          recordings.push(r);
+          // Start WebRTC connections
+          const ice_servers = [{"urls": "stun:" + hostname + ":3478"}];
+          ConnectWebRTC(this, r, ice_servers);
+          playback_button_element.addEventListener('click', (e) => { if (r.data_channel) r.data_channel.send("{\"method\":\"playback\",\"start_time\":" + (Date.now() - (43200 * 1000)) + "}"); }); // Go back 12hours
+          live_button_element.addEventListener('click', (e) => { if (r.data_channel) r.data_channel.send("{\"method\":\"live\"}"); });
+        }
+        // Now listen to all future messages
+        this.websocket.onmessage = (event) =>
+        {
+          const data = JSON.parse(event.data)
+          // Process the response
+          if (data.method == "call_webrtc")
+          {
+            const recording = recordings.find((element) => (element.recording_token == data.return_params.recording_token));
+            if (recording == null)
+            {
+              return;
+            }
+            const descr = new RTCSessionDescription({ sdp: data.result.sdp, type: "answer" });
+            recording.pc.setRemoteDescription(descr, () => {});
+          }
+          else if (data.method == "file_added")
+          {
+            // Event
+          }
+          else if (data.method == "file_monitor_available")
+          {
+            // Event
+          }
+          else if (data.method == "file_monitor_unavailable")
+          {
+            // Event
+          }
+          else if (data.method == "file_mounted")
+          {
+            // Event
+          }
+          else if (data.method == "file_mounting")
+          {
+            // Event
+          }
+          else if (data.method == "file_removed")
+          {
+            // Event
+          }
+          else if (data.method == "file_unmounted")
+          {
+            // Event
+          }
+          else if (data.method == "file_unmounting")
+          {
+            // Event
+          }
+          else if (data.method == "group_added")
+          {
+            // Event
+          }
+          else if (data.method == "group_changed")
+          {
+            // Event
+          }
+          else if (data.method == "group_removed")
+          {
+            // Event
+          }
+          else if (data.method == "hardware_statistics")
+          {
+            // Event
+          }
+          else if (data.method == "location_changed")
+          {
+            // Event
+          }
+          else if (data.method == "map_added")
+          {
+            // Event
+          }
+          else if (data.method == "map_changed")
+          {
+            // Event
+          }
+          else if (data.method == "map_removed")
+          {
+            // Event
+          }
+          else if (data.method == "mount_added")
+          {
+            // Event
+          }
+          else if (data.method == "mount_removed")
+          {
+            // Event
+          }
+          else if (data.method == "name_changed")
+          {
+            for (let i = 0; i < recordings.length; i++)
+            {
+              const recording = recordings[i];
+              const device_name_element = document.createElement("p");
+              device_name_element.appendChild(document.createTextNode(data.params.name));
+              recording.device_name_element.replaceChildren(device_name_element);
+            }
+          }
+          else if (data.method == "onvif_user_added")
+          {
+            // Event
+          }
+          else if (data.method == "onvif_user_changed")
+          {
+            // Event
+          }
+          else if (data.method == "onvif_user_removed")
+          {
+            // Event
+          }
+          else if (data.method == "receiver_added")
+          {
+            // Event
+          }
+          else if (data.method == "receiver_changed")
+          {
+            // Event
+          }
+          else if (data.method == "receiver_removed")
+          {
+            // Event
+          }
+          else if (data.method == "recording_job_source_added")
+          {
+            // Event
+          }
+          else if (data.method == "recording_job_source_removed")
+          {
+            // Event
+          }
+          else if (data.method == "recording_job_source_track_added")
+          {
+            // Event
+          }
+          else if (data.method == "recording_job_source_track_log_message")
+          {
+            // Event
+          }
+          else if (data.method == "recording_job_source_track_removed")
+          {
+            // Event
+          }
+          else if (data.method == "recording_log_message")
+          {
+            // Event
+          }
+          else if (data.method == "recording_statistics")
+          {
+            // Event
+          }
+          else if (data.method == "recording_track_log_message")
+          {
+            // Event
+          }
+          else if (data.method == "recording_added")
+          {
+            // Event
+          }
+          else if (data.method == "recording_job_added")
+          {
+            // Event
+          }
+          else if (data.method == "recording_track_added")
+          {
+            // Event
+          }
+          else if (data.method == "recording_removed")
+          {
+            // Event
+          }
+          else if (data.method == "recording_job_added")
+          {
+            // Event
+          }
+          else if (data.method == "recording_track_removed")
+          {
+            // Event
+          }
+          else if (data.method == "recording_changed")
+          {
+            // Event
+          }
+          else if (data.method == "recording_job_changed")
+          {
+            // Event
+          }
+          else if (data.method == "recording_track_changed")
+          {
+            // Event
+          }
+          else if (data.method == "recording_job_active")
+          {
+            // Event
+          }
+          else if (data.method == "recording_job_source_track_active_parameters_changed")
+          {
+            // Event
+          }
+          else if (data.method == "recording_job_source_track_state_changed")
+          {
+            // Event
+          }
+          else if (data.method == "recording_track_codec_added")
+          {
+            // Event
+          }
+          else if (data.method == "recording_track_codec_removed")
+          {
+            // Event
+          }
+          else if (data.method == "log_message")
+          {
+            // Event
+          }
+          else if (data.method == "recording_track_set_data")
+          {
+            // Event
+          }
+          else if (data.method == "recording_track_delete_data")
+          {
+            // Event
+          }
+          else if (data.method == "user_added")
+          {
+            // Event
+          }
+          else if (data.method == "user_changed")
+          {
+            // Event
+          }
+          else if (data.method == "user_removed")
+          {
+            // Event
+          }
+          else
+          {
+            console.log("unknown message: ", data);
+          }
+        }
+      }
+    };
+  }
+  
+  send_message(method, parameters, return_parameters)
+  {
+    this.websocket.send("{\"jsonrpc\":\"2.0\",\"id\":\"" + ++this.next_message_id + "\",\"method\":\"" + method + "\",\"params\":" + parameters + ",\"return_params\":" + return_parameters + "}");
+  }
+}
+
+function OnAddStream(recording, stream)
+{
+  recording.video_element.srcObject = stream;
+  recording.video_element.play().then(() =>
+    {
+      recording.video_element.controls = false;
+      recording.video_element.style.opacity = "1.0";
+    }).catch((error) => {
+      console.warn("error: ", error);
+    });
+}
+
+// Functions
+function login()
+{
+  var table = document.getElementById("table");
+  table.hidden = false;
+  var form = document.getElementById("form");
+  form.hidden = true;
+  var hostname = document.getElementById("hostname");
+  var port = document.getElementById("port");
+  var username = document.getElementById("username");
+  var password = document.getElementById("password");
+  connection = new Connection(hostname.value, port.value, username.value, password.value);
+}
+
+function ConnectWebRTC(connection, recording, config)
+{
+  // Ice servers
+  let ice_servers = new Object();
+  ice_servers.iceServers = config;
+  ice_servers.iceCandidatePoolSize = 30;
+  try
+  {
+    // Create peer connection
+    recording.pc = new RTCPeerConnection(ice_servers);
+    recording.pc.ontrack = (ev) => { ev.streams.forEach((stream) => OnAddStream(recording, stream)); };
+    recording.pc.addTransceiver('video', { direction: 'recvonly' });
+    recording.pc.addTransceiver('audio', { direction: 'recvonly' });
+    recording.pc.ondatachannel = (evt) =>
+      {
+        evt.channel.onopen = function ()
+        {
+          recording.data_channel = evt.channel;
+        };
+        evt.channel.onmessage = (event) =>
+        {
+          console.log("data message: ", event);
+        };
+      };
+    recording.pc.onicegatheringstatechange = () =>
+      {
+        if (recording.pc.iceGatheringState === "complete")
+        {
+          connection.send_message("call_webrtc", "{\"jwttoken\":\"" + connection.jwttoken + "\",\"peer_id\":\"" + recording.peer_id + "\",\"recording_token\":\"" + recording.recording_token + "\",\"video_track_id\":\"" + recording.video_track_id + "\",\"audio_track_id\":\"" + recording.audio_track_id + "\",\"sdp\":" + JSON.stringify(recording.pc.localDescription.sdp) + "}", "{\"recording_token\":\"" + recording.recording_token + "\"}");
+        }
+      };
+    // Create data channel
+    try
+    {
+      const data_channel = recording.pc.createDataChannel("ClientDataChannel");
+      data_channel.onopen = function ()
+        {
+          console.log("datachannel open");
+        };
+      data_channel.onmessage = function (evt)
+        {
+          console.log("datachannel received message:", evt.data);
+        };
+    } catch (e)
+    {
+      console.log("Cannot create datachannel error: " + e);
+    }
+  
+    media_constraints =
+    {
+      voiceActivityDetection: false,
+      offerToReceiveAudio: true,
+      offerToReceiveVideo: true
+    };
+    recording.pc.createOffer(media_constraints).then((session_description) =>
+    {
+      recording.pc.setLocalDescription(session_description);
+    },
+    (error) =>
+    {
+      alert("Create offer error:" + JSON.stringify(error));
+    });
+  }
+  catch (e)
+  {
+    alert("connect error: " + e);
+  }
+}
+
+// Main
+document.getElementById("hostname").value = window.location.host;
+</script>
+</body>
+</html>
